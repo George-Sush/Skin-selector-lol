@@ -1,0 +1,12 @@
+.gradle/
+.kotlin/
+**/build/
+.idea/
+local.properties
+*.iml
+.DS_Store
+Thumbs.db
+app/src/main/assets/skins/**/*.png
+app/src/main/assets/skins/**/*.jpg
+app/src/main/assets/skins/**/*.jpeg
+app/src/main/assets/skins/**/*.webp
