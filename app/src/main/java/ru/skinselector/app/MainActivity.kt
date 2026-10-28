@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.content.SharedPreferences
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -49,6 +50,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -59,8 +64,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -71,7 +79,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileNotFoundException
 
-private val LocalSkinPalette = staticCompositionLocalOf { SkinPalette.forTheme(ColorTheme.VIOLET) }
+internal val LocalSkinPalette = staticCompositionLocalOf { SkinPalette.forTheme(ColorTheme.VIOLET) }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,6 +142,16 @@ private fun SkinSelectorApp(
     var splashOpacity by rememberSaveable {
         mutableStateOf(preferences.getFloat("splash_opacity", 0.24f).coerceIn(0f, 1f))
     }
+    var uniqueRollsEnabled by rememberSaveable {
+        mutableStateOf(preferences.getBoolean("unique_rolls", true))
+    }
+    var revealAnimationEnabled by rememberSaveable {
+        mutableStateOf(preferences.getBoolean("reveal_animation", true))
+    }
+    var rollHistory by remember {
+        mutableStateOf(loadRollHistory(preferences))
+    }
+    var revealAnimationTrigger by rememberSaveable { mutableStateOf(0) }
     val mode = RollMode.entries.firstOrNull { it.name == modeName } ?: RollMode.SKINS_ONLY
     val champion = champions.firstOrNull { it.id == selectedChampionId } ?: champions.first()
     var enabledSkins by remember(champion.id) {
@@ -174,7 +192,8 @@ private fun SkinSelectorApp(
                         horizontalArrangement = Arrangement.SpaceAround
                     ) {
                         TabItem("🎲", tr(language, "Рандом", "Random"), selectedTab == 0) { selectedTab = 0 }
-                        TabItem("✦", tr(language, "Вкладка 2", "Tab 2"), selectedTab == 1) { selectedTab = 1 }
+                        TabItem("▤", tr(language, "История", "History"), selectedTab == 1) { selectedTab = 1 }
+                        TabItem("✦", tr(language, "Ещё", "More"), selectedTab == 2) { selectedTab = 2 }
                     }
                 }
             }
@@ -187,6 +206,8 @@ private fun SkinSelectorApp(
                     selectedTheme = selectedTheme,
                     autoThemeEnabled = autoThemeEnabled,
                     splashOpacity = splashOpacity,
+                    uniqueRollsEnabled = uniqueRollsEnabled,
+                    revealAnimationEnabled = revealAnimationEnabled,
                     favoriteChampions = favoriteChampions,
                     modifier = Modifier.padding(padding),
                     onBack = { settingsOpen = false },
@@ -205,6 +226,14 @@ private fun SkinSelectorApp(
                     onSplashOpacityChange = {
                         splashOpacity = it
                         preferences.edit().putFloat("splash_opacity", it).apply()
+                    },
+                    onUniqueRollsChange = {
+                        uniqueRollsEnabled = it
+                        preferences.edit().putBoolean("unique_rolls", it).apply()
+                    },
+                    onRevealAnimationChange = {
+                        revealAnimationEnabled = it
+                        preferences.edit().putBoolean("reveal_animation", it).apply()
                     },
                     onEnableAllChampions = {
                         val allIds = champions.map { champion -> champion.id }.toSet()
@@ -370,11 +399,20 @@ private fun SkinSelectorApp(
                             resultSkinId = resultSkinId,
                             resultChromaId = resultChromaId,
                             splashOpacity = splashOpacity,
+                            revealAnimationEnabled = revealAnimationEnabled,
+                            revealAnimationTrigger = revealAnimationTrigger,
                             onRoll = {
+                                val previous = rollHistory.firstOrNull { it.championId == champion.id }
                                 val availableSkins = champion.skins.filter { it.id in enabledSkins }
+                                fun <T> chooseWithoutRepeat(entries: List<T>, repeatsPrevious: (T) -> Boolean): T? {
+                                    if (entries.isEmpty()) return null
+                                    val alternatives = if (uniqueRollsEnabled && entries.size > 1) entries.filterNot(repeatsPrevious) else entries
+                                    return (alternatives.ifEmpty { entries }).random()
+                                }
                                 when (mode) {
                                     RollMode.SKINS_ONLY -> {
-                                        resultSkinId = availableSkins.randomOrNull()?.id
+                                        val chosen = chooseWithoutRepeat(availableSkins) { it.id == previous?.skinId }
+                                        resultSkinId = chosen?.id
                                         resultChromaId = null
                                     }
                                     RollMode.TOGETHER -> {
@@ -383,26 +421,34 @@ private fun SkinSelectorApp(
                                                 .filter { "${skin.id}:${it.id}" in enabledChromas }
                                                 .map { skin.id to it.id }
                                         }
-                                        entries.randomOrNull()?.let { (skinId, chromaId) ->
+                                        val chosen = chooseWithoutRepeat(entries) { it.first == previous?.skinId && it.second == previous.chromaId }
+                                        chosen?.let { (skinId, chromaId) ->
                                             resultSkinId = skinId
                                             resultChromaId = chromaId
                                         }
                                     }
                                     RollMode.IN_STAGES -> {
-                                        val resultSkin = champion.skins.firstOrNull { it.id == resultSkinId }
-                                        val chromasForResult = resultSkin?.let { skin ->
-                                            skin.chromas.filter { "${skin.id}:${it.id}" in enabledChromas }
-                                        }.orEmpty()
-                                        if (resultSkin != null && chromasForResult.isNotEmpty() && resultChromaId == null) {
-                                            resultChromaId = chromasForResult.random().id
+                                        val skin = champion.skins.firstOrNull { it.id == resultSkinId }
+                                        val availableChromas = skin?.chromas.orEmpty()
+                                            .filter { "${skin?.id}:${it.id}" in enabledChromas }
+                                        if (skin != null && availableChromas.isNotEmpty() && resultChromaId == null) {
+                                            val chosen = chooseWithoutRepeat(availableChromas) { it.id == previous?.chromaId }
+                                            resultChromaId = chosen?.id
                                         } else {
-                                            resultSkinId = availableSkins.randomOrNull()?.id
+                                            val chosen = chooseWithoutRepeat(availableSkins) { it.id == previous?.skinId }
+                                            resultSkinId = chosen?.id
                                             resultChromaId = null
                                         }
                                     }
                                 }
-                                if (champion.id == "teemo") {
-                                    preferences.edit().putString("last_result_skin", resultSkinId).apply()
+                                resultSkinId?.let { skinId ->
+                                    val result = RollHistoryEntry(champion.id, skinId, resultChromaId, System.currentTimeMillis())
+                                    rollHistory = (listOf(result) + rollHistory).take(MAX_ROLL_HISTORY)
+                                    saveRollHistory(preferences, rollHistory)
+                                    if (revealAnimationEnabled) revealAnimationTrigger++
+                                    if (champion.id == "teemo") {
+                                        preferences.edit().putString("last_result_skin", skinId).apply()
+                                    }
                                 }
                             },
                             hasEnabledSkins = champion.skins.any { it.id in enabledSkins },
@@ -471,23 +517,30 @@ private fun SkinSelectorApp(
                     )
                 }
             }
+            } else if (selectedTab == 1) {
+                RollHistoryScreen(
+                    champions = champions,
+                    history = rollHistory,
+                    language = language,
+                    modifier = Modifier.padding(padding)
+                )
             } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("✦", fontSize = 42.sp, color = palette.accent)
-                    Spacer(Modifier.height(12.dp))
-                    Text(tr(language, "Здесь пока пусто", "Nothing here yet"), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(6.dp))
-                    Text(tr(language, "Эта вкладка будет доступна позже", "This tab will be available later"), color = palette.muted, fontSize = 14.sp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("✦", fontSize = 42.sp, color = palette.accent)
+                        Spacer(Modifier.height(12.dp))
+                        Text(tr(language, "Здесь пока пусто", "Nothing here yet"), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(tr(language, "Эта вкладка будет доступна позже", "This tab will be available later"), color = palette.muted, fontSize = 14.sp)
+                    }
                 }
             }
         }
-    }
     }
 }
 
@@ -520,6 +573,8 @@ private fun SettingsScreen(
     selectedTheme: ColorTheme,
     autoThemeEnabled: Boolean,
     splashOpacity: Float,
+    uniqueRollsEnabled: Boolean,
+    revealAnimationEnabled: Boolean,
     favoriteChampions: Set<String>,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
@@ -527,6 +582,8 @@ private fun SettingsScreen(
     onThemeChange: (ColorTheme) -> Unit,
     onAutoThemeChange: (Boolean) -> Unit,
     onSplashOpacityChange: (Float) -> Unit,
+    onUniqueRollsChange: (Boolean) -> Unit,
+    onRevealAnimationChange: (Boolean) -> Unit,
     onEnableAllChampions: () -> Unit,
     onDisableAllChampions: () -> Unit,
     onDisableNonFavoriteChampions: () -> Unit,
@@ -650,6 +707,22 @@ private fun SettingsScreen(
                     )
                 }
             }
+        }
+        item {
+            SettingsToggle(
+                title = tr(language, "Гарантия уникальных выпадений", "Unique drops guarantee"),
+                description = tr(language, "Не повторять предыдущий скин или хрому", "Avoid repeating the previous skin or chroma"),
+                checked = uniqueRollsEnabled,
+                onCheckedChange = onUniqueRollsChange
+            )
+        }
+        item {
+            SettingsToggle(
+                title = tr(language, "Анимация выпадения", "Result reveal animation"),
+                description = tr(language, "Мягкое появление выбранного скина", "A subtle reveal animation for the selected skin"),
+                checked = revealAnimationEnabled,
+                onCheckedChange = onRevealAnimationChange
+            )
         }
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -850,6 +923,8 @@ private fun RollPanel(
     resultSkinId: String?,
     resultChromaId: String?,
     splashOpacity: Float,
+    revealAnimationEnabled: Boolean,
+    revealAnimationTrigger: Int,
     hasEnabledSkins: Boolean,
     enabledChromas: Set<String>,
     onModeChange: (RollMode) -> Unit,
@@ -907,6 +982,18 @@ private fun RollPanel(
                         Text(tr(language, "Скин или его вариант появится здесь", "The selected skin or chroma appears here"), color = palette.muted, fontSize = 12.sp)
                     }
                 }
+                val revealScale = remember { Animatable(1f) }
+                val revealAlpha = remember { Animatable(1f) }
+                var lastRevealTrigger by remember { mutableStateOf(revealAnimationTrigger) }
+                LaunchedEffect(revealAnimationTrigger, revealAnimationEnabled) {
+                    if (revealAnimationEnabled && revealAnimationTrigger != lastRevealTrigger) {
+                        lastRevealTrigger = revealAnimationTrigger
+                        revealScale.snapTo(0.94f)
+                        revealAlpha.snapTo(0.65f)
+                        revealScale.animateTo(1f, animationSpec = tween(320))
+                        revealAlpha.animateTo(1f, animationSpec = tween(320))
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -938,6 +1025,11 @@ private fun RollPanel(
                     if (imagePath != null) {
                         Box(
                             modifier = Modifier
+                                .graphicsLayer {
+                                    scaleX = revealScale.value
+                                    scaleY = revealScale.value
+                                    alpha = revealAlpha.value
+                                }
                                 .size(width = 160.dp, height = 208.dp)
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(palette.panel.copy(alpha = .84f)),
@@ -1147,7 +1239,7 @@ private fun Avatar(letter: String, color: Color) {
 }
 
 @Composable
-private fun SkinThumbnail(
+internal fun SkinThumbnail(
     path: String,
     contentDescription: String,
     fallbackText: String,
@@ -1201,7 +1293,7 @@ private fun AssetImage(
     }
 }
 
-private fun tr(language: AppLanguage, russian: String, english: String): String =
+internal fun tr(language: AppLanguage, russian: String, english: String): String =
     if (language == AppLanguage.ENGLISH) english else russian
 
 private fun rollModeLabel(mode: RollMode, language: AppLanguage): String = when (mode) {
