@@ -23,12 +23,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -51,6 +53,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
@@ -76,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.FileNotFoundException
 
@@ -121,6 +125,7 @@ private fun SkinSelectorApp(
     var favoriteChampions by remember {
         mutableStateOf(preferences.getStringSet("favorite_champions", null)?.toSet().orEmpty())
     }
+    var prioritizeEnabledChampions by rememberSaveable { mutableStateOf(preferences.getBoolean("prioritize_enabled_champions", false)) }
     var championSearch by rememberSaveable { mutableStateOf("") }
     var selectedChampionId by rememberSaveable {
         mutableStateOf(
@@ -147,6 +152,38 @@ private fun SkinSelectorApp(
     }
     var revealAnimationEnabled by rememberSaveable {
         mutableStateOf(preferences.getBoolean("reveal_animation", true))
+    }
+    var splashDownloadsEnabled by rememberSaveable { mutableStateOf(preferences.getBoolean("download_splashes", true)) }
+    var developerModeEnabled by rememberSaveable { mutableStateOf(preferences.getBoolean("developer_mode", false)) }
+    var imageCacheVersion by remember { mutableStateOf(0) }
+    var downloadingChampionId by remember { mutableStateOf<String?>(null) }
+    var downloadProgress by remember { mutableStateOf(0) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
+    val imageContext = LocalContext.current
+    val imageScope = rememberCoroutineScope()
+    var confirmedCacheAction by remember { mutableStateOf<Champion?>(null) }
+    var confirmClearAllNonFavorites by remember { mutableStateOf(false) }
+    fun startChampionDownload(selectedChampion: Champion) {
+        if (downloadingChampionId != null) return
+        downloadError = null
+        downloadingChampionId = selectedChampion.id
+        downloadProgress = 0
+        imageScope.launch {
+            val result = CommunityDragonImageCache.downloadChampion(imageContext, selectedChampion, splashDownloadsEnabled) { progress ->
+                downloadProgress = progress
+            }
+            result.onFailure { error ->
+                val failedUrl = (error as? CommunityDragonImageCache.DownloadException)?.url
+                val cause = error.cause
+                val isNetworkError = cause is java.net.UnknownHostException || cause is java.net.ConnectException || cause is java.net.SocketTimeoutException
+                val detail = if (isNetworkError) tr(language, "Нет соединения с интернетом. Проверь подключение и попробуй снова.", "No internet connection. Check your connection and try again.")
+                    else error.message ?: tr(language, "Не удалось скачать изображения", "Could not download images")
+                downloadError = if (developerModeEnabled && failedUrl != null) "$detail\nURL: $failedUrl" else detail
+            }
+            downloadingChampionId = null
+            if (result.isSuccess) downloadError = null
+            imageCacheVersion++
+        }
     }
     var rollHistory by remember {
         mutableStateOf(loadRollHistory(preferences))
@@ -202,12 +239,20 @@ private fun SkinSelectorApp(
                 SettingsScreen(
                     champions = champions,
                     enabledChampions = enabledChampions,
+                    prioritizeEnabledChampions = prioritizeEnabledChampions,
+                    cacheSizeBytes = CommunityDragonImageCache.cacheSizeBytes(imageContext),
                     language = language,
                     selectedTheme = selectedTheme,
                     autoThemeEnabled = autoThemeEnabled,
                     splashOpacity = splashOpacity,
                     uniqueRollsEnabled = uniqueRollsEnabled,
                     revealAnimationEnabled = revealAnimationEnabled,
+                    splashDownloadsEnabled = splashDownloadsEnabled,
+                    developerModeEnabled = developerModeEnabled,
+                    imageCacheVersion = imageCacheVersion,
+                    downloadingChampionId = downloadingChampionId,
+                    downloadProgress = downloadProgress,
+                    downloadError = downloadError,
                     favoriteChampions = favoriteChampions,
                     modifier = Modifier.padding(padding),
                     onBack = { settingsOpen = false },
@@ -234,6 +279,39 @@ private fun SkinSelectorApp(
                     onRevealAnimationChange = {
                         revealAnimationEnabled = it
                         preferences.edit().putBoolean("reveal_animation", it).apply()
+                    },
+                    onSplashDownloadsChange = {
+                        splashDownloadsEnabled = it
+                        preferences.edit().putBoolean("download_splashes", it).apply()
+                    },
+                    onDeveloperModeChange = {
+                        developerModeEnabled = it
+                        preferences.edit().putBoolean("developer_mode", it).apply()
+                    },
+                    onPrioritizeEnabledChampionsChange = {
+                        prioritizeEnabledChampions = it
+                        preferences.edit().putBoolean("prioritize_enabled_champions", it).apply()
+                    },
+                    onDownloadChampion = { selectedChampion -> startChampionDownload(selectedChampion) },
+                    onClearChampionCache = { selectedChampion ->
+                        CommunityDragonImageCache.clearChampion(imageContext, selectedChampion)
+                        downloadError = null
+                        imageCacheVersion++
+                    },
+                    onClearAllNonFavoriteCaches = {
+                        CommunityDragonImageCache.clearExcept(imageContext, favoriteChampions)
+                        downloadError = null
+                        imageCacheVersion++
+                    },
+                    onClearAllCaches = {
+                        CommunityDragonImageCache.clearAll(imageContext)
+                        downloadError = null
+                        imageCacheVersion++
+                    },
+                    onClearExceptFavoritesAndEnabled = {
+                        CommunityDragonImageCache.clearExcept(imageContext, favoriteChampions + enabledChampions)
+                        downloadError = null
+                        imageCacheVersion++
                     },
                     onEnableAllChampions = {
                         val allIds = champions.map { champion -> champion.id }.toSet()
@@ -338,8 +416,7 @@ private fun SkinSelectorApp(
                 if (enabledChampions.isNotEmpty()) {
                     item {
                         val filteredChampions = champions.filter {
-                            it.id in enabledChampions &&
-                                it.displayName(language).contains(championSearch.trim(), ignoreCase = true)
+                            it.id in enabledChampions && it.matchesSearch(championSearch)
                         }.sortedWith(
                             compareByDescending<Champion> { it.id in favoriteChampions }
                                 .thenBy { it.displayName(language) }
@@ -401,6 +478,11 @@ private fun SkinSelectorApp(
                             splashOpacity = splashOpacity,
                             revealAnimationEnabled = revealAnimationEnabled,
                             revealAnimationTrigger = revealAnimationTrigger,
+                            imageCacheVersion = imageCacheVersion,
+                            isDownloading = downloadingChampionId == champion.id,
+                            downloadProgress = downloadProgress,
+                            downloadError = downloadError.takeIf { downloadingChampionId == champion.id || CommunityDragonImageCache.hasChampionImages(imageContext, champion).not() },
+                            onDownload = { startChampionDownload(champion) },
                             onRoll = {
                                 val previous = rollHistory.firstOrNull { it.championId == champion.id }
                                 val availableSkins = champion.skins.filter { it.id in enabledSkins }
@@ -522,7 +604,11 @@ private fun SkinSelectorApp(
                     champions = champions,
                     history = rollHistory,
                     language = language,
-                    modifier = Modifier.padding(padding)
+                    modifier = Modifier.padding(padding),
+                    onClearHistory = { period ->
+                        rollHistory = clearHistoryBefore(rollHistory, period)
+                        saveRollHistory(preferences, rollHistory)
+                    }
                 )
             } else {
                 Box(
@@ -569,12 +655,20 @@ private fun Header(language: AppLanguage, onSettings: () -> Unit) {
 private fun SettingsScreen(
     champions: List<Champion>,
     enabledChampions: Set<String>,
+    prioritizeEnabledChampions: Boolean,
+    cacheSizeBytes: Long,
     language: AppLanguage,
     selectedTheme: ColorTheme,
     autoThemeEnabled: Boolean,
     splashOpacity: Float,
     uniqueRollsEnabled: Boolean,
     revealAnimationEnabled: Boolean,
+    splashDownloadsEnabled: Boolean,
+    developerModeEnabled: Boolean,
+    imageCacheVersion: Int,
+    downloadingChampionId: String?,
+    downloadProgress: Int,
+    downloadError: String?,
     favoriteChampions: Set<String>,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
@@ -584,6 +678,14 @@ private fun SettingsScreen(
     onSplashOpacityChange: (Float) -> Unit,
     onUniqueRollsChange: (Boolean) -> Unit,
     onRevealAnimationChange: (Boolean) -> Unit,
+    onSplashDownloadsChange: (Boolean) -> Unit,
+    onDeveloperModeChange: (Boolean) -> Unit,
+    onPrioritizeEnabledChampionsChange: (Boolean) -> Unit,
+    onDownloadChampion: (Champion) -> Unit,
+    onClearChampionCache: (Champion) -> Unit,
+    onClearAllNonFavoriteCaches: () -> Unit,
+    onClearAllCaches: () -> Unit,
+    onClearExceptFavoritesAndEnabled: () -> Unit,
     onEnableAllChampions: () -> Unit,
     onDisableAllChampions: () -> Unit,
     onDisableNonFavoriteChampions: () -> Unit,
@@ -592,11 +694,17 @@ private fun SettingsScreen(
 ) {
     val palette = LocalSkinPalette.current
     var query by rememberSaveable { mutableStateOf("") }
-    val filteredChampions = remember(champions, language, query, favoriteChampions) {
+    var confirmedCacheAction by remember { mutableStateOf<Champion?>(null) }
+    var confirmClearAllNonFavorites by remember { mutableStateOf(false) }
+    var confirmClearEntireCache by remember { mutableStateOf(false) }
+    var confirmClearExceptFavoritesAndEnabled by remember { mutableStateOf(false) }
+    var downloadTarget by remember { mutableStateOf<Champion?>(null) }
+    val filteredChampions = remember(champions, language, query, favoriteChampions, enabledChampions, prioritizeEnabledChampions) {
         champions.filter {
             it.displayName(language).contains(query.trim(), ignoreCase = true)
         }.sortedWith(
             compareByDescending<Champion> { it.id in favoriteChampions }
+                .thenByDescending { prioritizeEnabledChampions && it.id in enabledChampions }
                 .thenBy { it.displayName(language) }
         )
     }
@@ -725,6 +833,71 @@ private fun SettingsScreen(
             )
         }
         item {
+            SettingsToggle(
+                title = tr(language, "Скачивать сплеш-арты", "Download splash arts"),
+                description = tr(language, "Сохранять изображения загрузки чемпионов в кеше", "Store champion splash arts in the image cache"),
+                checked = splashDownloadsEnabled,
+                onCheckedChange = onSplashDownloadsChange
+            )
+        }
+        item {
+            SettingsToggle(
+                title = tr(language, "Режим разработчика", "Developer mode"),
+                description = tr(language, "Показывает управление кешем изображений", "Show image cache controls"),
+                checked = developerModeEnabled,
+                onCheckedChange = onDeveloperModeChange
+            )
+        }
+        item {
+            SettingsToggle(
+                title = tr(language, "Поднимать включённых героев", "Prioritize enabled champions"),
+                description = tr(language, "Включённые персонажи будут сразу после избранных", "Enabled champions appear just below favorites"),
+                checked = prioritizeEnabledChampions,
+                onCheckedChange = onPrioritizeEnabledChampionsChange
+            )
+        }
+        if (developerModeEnabled) {
+            item {
+                Surface(color = palette.panel, shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                        Text(tr(language, "Размер кеша изображений", "Image cache size"), color = palette.muted, fontSize = 12.sp)
+                        Text(formatBytes(cacheSizeBytes), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = { confirmClearAllNonFavorites = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC53945), contentColor = Color.White)
+                    ) { Text(tr(language, "Очистить всё, кроме избранных", "Clear all except favorites")) }
+                    Button(
+                        onClick = { confirmClearExceptFavoritesAndEnabled = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC53945), contentColor = Color.White)
+                    ) { Text(tr(language, "Очистить кроме избранных и включённых", "Clear except favorites and enabled")) }
+                    Button(
+                        onClick = { confirmClearEntireCache = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9F1D2D), contentColor = Color.White)
+                    ) { Text(tr(language, "Очистить весь кеш", "Clear all cache")) }
+                }
+            }
+        }
+        downloadError?.let { error ->
+            item {
+                Surface(color = Color(0xFFFFE4E6), shape = RoundedCornerShape(14.dp)) {
+                    Text(
+                        "⚠  $error",
+                        color = Color(0xFFB4232F),
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+        item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -803,6 +976,35 @@ private fun SettingsScreen(
                                 fontSize = 11.sp
                             )
                         }
+                        val context = LocalContext.current
+                        val championHasImages = remember(imageCacheVersion, champion.id) {
+                            CommunityDragonImageCache.hasChampionImages(context, champion)
+                        }
+                        if (championHasImages) {
+                            Column(horizontalAlignment = Alignment.End) {
+                                TextButton(onClick = { confirmedCacheAction = champion }) {
+                                    Text(tr(language, "Удалить кеш", "Delete cache"), color = Color(0xFFC53945), fontSize = 10.sp)
+                                }
+                                TextButton(onClick = { onDownloadChampion(champion) }, enabled = downloadingChampionId == null) {
+                                    Text(tr(language, "Загрузить заново", "Download again"), color = palette.accent, fontSize = 10.sp)
+                                }
+                            }
+                        } else {
+                            TextButton(onClick = { onDownloadChampion(champion) }, enabled = downloadingChampionId == null) {
+                                Text(tr(language, "Скачать", "Download"), color = palette.accent, fontSize = 11.sp)
+                            }
+                        }
+                        if (downloadingChampionId == champion.id) {
+                            Column(Modifier.width(72.dp), horizontalAlignment = Alignment.End) {
+                                Text("$downloadProgress%", color = palette.accent, fontSize = 10.sp)
+                                androidx.compose.material3.LinearProgressIndicator(
+                                    progress = { downloadProgress / 100f },
+                                    modifier = Modifier.fillMaxWidth().height(5.dp),
+                                    color = palette.accent,
+                                    trackColor = palette.page
+                                )
+                            }
+                        }
                         Checkbox(
                             checked = champion.id in enabledChampions,
                             onCheckedChange = { onChampionToggle(champion.id, it) },
@@ -817,6 +1019,73 @@ private fun SettingsScreen(
                 }
             }
         }
+    }
+    confirmedCacheAction?.let { target ->
+        AlertDialog(
+            onDismissRequest = { confirmedCacheAction = null },
+            title = { Text(tr(language, "Очистить кеш героя?", "Clear champion cache?")) },
+            text = { Text(tr(language, "Изображения ${target.displayName(language)} будут удалены с устройства.", "Cached images for ${target.displayName(language)} will be removed from this device.")) },
+            confirmButton = {
+                TextButton(onClick = { onClearChampionCache(target); confirmedCacheAction = null }) {
+                    Text(tr(language, "Очистить", "Clear"), color = Color(0xFFC53945))
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmedCacheAction = null }) { Text(tr(language, "Отмена", "Cancel")) } }
+        )
+    }
+    if (confirmClearAllNonFavorites) {
+        AlertDialog(
+            onDismissRequest = { confirmClearAllNonFavorites = false },
+            title = { Text(tr(language, "Очистить кеш?", "Clear image cache?")) },
+            text = { Text(tr(language, "Кеш всех героев, кроме избранных, будет удалён.", "Cached images for all non-favorite champions will be deleted.")) },
+            confirmButton = {
+                TextButton(onClick = { onClearAllNonFavoriteCaches(); confirmClearAllNonFavorites = false }) {
+                    Text(tr(language, "Очистить", "Clear"), color = Color(0xFFC53945))
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearAllNonFavorites = false }) { Text(tr(language, "Отмена", "Cancel")) } }
+        )
+    }
+    if (confirmClearExceptFavoritesAndEnabled) {
+        AlertDialog(
+            onDismissRequest = { confirmClearExceptFavoritesAndEnabled = false },
+            title = { Text(tr(language, "Очистить кеш?", "Clear image cache?")) },
+            text = { Text(tr(language, "Кеш будет сохранён только для избранных и включённых героев.", "Only favorites and enabled champions will be kept in the cache.")) },
+            confirmButton = {
+                TextButton(onClick = { onClearExceptFavoritesAndEnabled(); confirmClearExceptFavoritesAndEnabled = false }) {
+                    Text(tr(language, "Очистить", "Clear"), color = Color(0xFFC53945))
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearExceptFavoritesAndEnabled = false }) { Text(tr(language, "Отмена", "Cancel")) } }
+        )
+    }
+    if (confirmClearEntireCache) {
+        AlertDialog(
+            onDismissRequest = { confirmClearEntireCache = false },
+            title = { Text(tr(language, "Очистить весь кеш?", "Clear the entire cache?")) },
+            text = { Text(tr(language, "Будут удалены все кешированные изображения.", "All cached images will be permanently deleted.")) },
+            confirmButton = {
+                TextButton(onClick = { onClearAllCaches(); confirmClearEntireCache = false }) {
+                    Text(tr(language, "Очистить всё", "Clear all"), color = Color(0xFFC53945))
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearEntireCache = false }) { Text(tr(language, "Отмена", "Cancel")) } }
+        )
+    }
+    downloadTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { downloadTarget = null },
+            title = { Text(tr(language, "Скачать изображения?", "Download images?")) },
+            text = { Text(tr(language, "Скачать картинки скинов${if (splashDownloadsEnabled) " и сплеш-арты" else ""} для ${target.displayName(language)}?", "Download skin images${if (splashDownloadsEnabled) " and splash arts" else ""} for ${target.displayName(language)}?")) },
+            confirmButton = {
+                TextButton(onClick = { onDownloadChampion(target); downloadTarget = null }) {
+                    Text(tr(language, "Скачать", "Download"), color = palette.accent)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { downloadTarget = null }) { Text(tr(language, "Отмена", "Cancel"), color = palette.muted) }
+            }
+        )
     }
 }
 
@@ -925,7 +1194,12 @@ private fun RollPanel(
     splashOpacity: Float,
     revealAnimationEnabled: Boolean,
     revealAnimationTrigger: Int,
+    imageCacheVersion: Int,
     hasEnabledSkins: Boolean,
+    isDownloading: Boolean,
+    downloadProgress: Int,
+    downloadError: String?,
+    onDownload: () -> Unit,
     enabledChromas: Set<String>,
     onModeChange: (RollMode) -> Unit,
     onRoll: () -> Unit
@@ -949,6 +1223,11 @@ private fun RollPanel(
     val splashImagePath = resultSkin?.let {
         it.splashAssetPath ?: "skins/${champion.id}/splashes/${it.id}.jpg"
     }
+    val imageContext = LocalContext.current
+    val hasCachedImages = remember(imageCacheVersion, champion.id) {
+        CommunityDragonImageCache.hasChampionImages(imageContext, champion)
+    }
+    val shouldShowDownload = !hasCachedImages
 
     Card(
         colors = CardDefaults.cardColors(containerColor = palette.panel),
@@ -1035,7 +1314,13 @@ private fun RollPanel(
                                 .background(palette.panel.copy(alpha = .84f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            AssetImage(imagePath, contentScale = ContentScale.Fit)
+                            // TODO: Re-enable bundled Teemo assets after fixing their image selection/loading.
+                            AssetImage(
+                                imagePath,
+                                contentScale = ContentScale.Fit,
+                                cacheVersion = imageCacheVersion,
+                                allowBundledAssetFallback = champion.id != "teemo"
+                            )
                         }
                     } else {
                         Text("?", color = palette.ink, fontSize = 42.sp, fontWeight = FontWeight.Bold)
@@ -1074,6 +1359,24 @@ private fun RollPanel(
                         }
                     }
                 }
+            }
+            if (isDownloading) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("$downloadProgress%", color = palette.accent, fontSize = 12.sp)
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { downloadProgress / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = palette.accent,
+                        trackColor = palette.page
+                    )
+                }
+            } else if (shouldShowDownload) {
+                Button(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
+                    Text(tr(language, "Скачать изображения", "Download images"))
+                }
+            }
+            downloadError?.let { error ->
+                Text(error, color = Color(0xFFC53945), fontSize = 12.sp)
             }
             Button(
                 onClick = onRoll,
@@ -1267,13 +1570,18 @@ private fun AssetImage(
     contentScale: ContentScale = ContentScale.Crop,
     contentDescription: String? = null,
     fallbackText: String = "?",
-    alpha: Float = 1f
+    alpha: Float = 1f,
+    cacheVersion: Int = 0,
+    allowBundledAssetFallback: Boolean = true
 ) {
     val context = LocalContext.current
-    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path, cacheVersion, allowBundledAssetFallback) {
         value = withContext(Dispatchers.IO) {
             try {
-                context.assets.open(path).use { BitmapFactory.decodeStream(it) }
+                val cached = CommunityDragonImageCache.fileFor(context, path)
+                if (cached.isFile) BitmapFactory.decodeFile(cached.path)
+                    ?: if (allowBundledAssetFallback) context.assets.open(path).use { BitmapFactory.decodeStream(it) } else null
+                else if (allowBundledAssetFallback) context.assets.open(path).use { BitmapFactory.decodeStream(it) } else null
             } catch (_: FileNotFoundException) {
                 null
             }
@@ -1295,6 +1603,12 @@ private fun AssetImage(
 
 internal fun tr(language: AppLanguage, russian: String, english: String): String =
     if (language == AppLanguage.ENGLISH) english else russian
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
 
 private fun rollModeLabel(mode: RollMode, language: AppLanguage): String = when (mode) {
     RollMode.SKINS_ONLY -> tr(language, "Только скины", "Skins only")

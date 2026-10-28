@@ -20,6 +20,14 @@ fun Champion.displayName(language: AppLanguage): String =
 fun Champion.displayTitle(language: AppLanguage): String =
     if (language == AppLanguage.ENGLISH) englishTitle ?: title else title
 
+fun Champion.matchesSearch(query: String): Boolean {
+    val normalized = query.trim()
+    if (normalized.isBlank()) return true
+    return listOf(id, name, englishName, displayName(AppLanguage.RUSSIAN), displayName(AppLanguage.ENGLISH))
+        .filterNotNull()
+        .any { it.contains(normalized, ignoreCase = true) }
+}
+
 fun Skin.displayName(language: AppLanguage): String =
     if (language == AppLanguage.ENGLISH) englishName ?: name else name
 
@@ -32,7 +40,11 @@ enum class ColorTheme(val preferenceValue: String, val labelRu: String, val labe
     FOREST("forest", "Лес", "Forest"),
     SUNSET("sunset", "Закат", "Sunset"),
     ROSE("rose", "Розовая", "Rose"),
-    YELLOW("yellow", "Жёлтая", "Yellow");
+    YELLOW("yellow", "Жёлтая", "Yellow"),
+    NOXUS("noxus", "Ноксус", "Noxus"),
+    DEMACIA("demacia", "Демасия", "Demacia"),
+    SHADOW_ISLES("shadow_isles", "Острова Теней", "Shadow Isles"),
+    PILTOVER("piltover", "Пилтовер", "Piltover");
 
     companion object {
         fun fromPreference(value: String?): ColorTheme =
@@ -97,6 +109,38 @@ data class SkinPalette(
                 androidx.compose.ui.graphics.Color(0xFF19160F),
                 androidx.compose.ui.graphics.Color(0xFFE7B93F),
                 androidx.compose.ui.graphics.Color(0xFFFFE08A)
+            )
+            ColorTheme.NOXUS -> SkinPalette(
+                androidx.compose.ui.graphics.Color(0xFFFFF1F1),
+                androidx.compose.ui.graphics.Color(0xFFB8959A),
+                androidx.compose.ui.graphics.Color(0xFF32191E),
+                androidx.compose.ui.graphics.Color(0xFF1B0D10),
+                androidx.compose.ui.graphics.Color(0xFFD64550),
+                androidx.compose.ui.graphics.Color(0xFFFF9B72)
+            )
+            ColorTheme.DEMACIA -> SkinPalette(
+                androidx.compose.ui.graphics.Color(0xFFF2F7FF),
+                androidx.compose.ui.graphics.Color(0xFF91A8C4),
+                androidx.compose.ui.graphics.Color(0xFF18283D),
+                androidx.compose.ui.graphics.Color(0xFF0B1422),
+                androidx.compose.ui.graphics.Color(0xFF6CA6E8),
+                androidx.compose.ui.graphics.Color(0xFFF0C86A)
+            )
+            ColorTheme.SHADOW_ISLES -> SkinPalette(
+                androidx.compose.ui.graphics.Color(0xFFEAFBF7),
+                androidx.compose.ui.graphics.Color(0xFF82AAA1),
+                androidx.compose.ui.graphics.Color(0xFF152C2D),
+                androidx.compose.ui.graphics.Color(0xFF091719),
+                androidx.compose.ui.graphics.Color(0xFF48C8B0),
+                androidx.compose.ui.graphics.Color(0xFF9C86E8)
+            )
+            ColorTheme.PILTOVER -> SkinPalette(
+                androidx.compose.ui.graphics.Color(0xFFF3FAFF),
+                androidx.compose.ui.graphics.Color(0xFF87A8BA),
+                androidx.compose.ui.graphics.Color(0xFF19303B),
+                androidx.compose.ui.graphics.Color(0xFF0C181D),
+                androidx.compose.ui.graphics.Color(0xFF48BBD0),
+                androidx.compose.ui.graphics.Color(0xFFFFC765)
             )
         }
     }
